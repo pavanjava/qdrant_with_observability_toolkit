@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # From docker-compose-openlit-gpu.yaml
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.4.1
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_PASSWORD: ${OPENLIT_DB_PASSWORD:-OPENLIT}   
+      CLICKHOUSE_USER: ${OPENLIT_DB_USER:-default}                   
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ports:
+      - "9000:9000" 
+      - "8123:8123" 
+    restart: always
+    networks:
+      - localprom
+  
+  openlit:
+    image: ghcr.io/openlit/openlit:latest
+    container_name: openlit
+    environment:
+      TELEMETRY_ENABLED: true
+      INIT_DB_HOST: clickhouse
+      INIT_DB_PORT: 8123
+      INIT_DB_DATABASE: ${OPENLIT_DB_NAME:-openlit}
+      INIT_DB_USERNAME: ${OPENLIT_DB_USER:-default}
+      INIT_DB_PASSWORD: ${OPENLIT_DB_PASSWORD:-OPENLIT}
+      SQLITE_DATABASE_URL: file:/app/client/data/data.db
+    ports:
+      - "3000:3000"
+    depends_on:
+      - clickhouse
+    volumes:
+      - openlit-data:/app/client/data
+    restart: always
+    networks:
+      - localprom
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.94.0
+    container_name: otel-collector
+    environment:
+      INIT_DB_HOST: clickhouse
+      INIT_DB_PORT: 9000
+      INIT_DB_DATABASE: ${OPENLIT_DB_NAME:-openlit}
+      INIT_DB_USERNAME: ${OPENLIT_DB_USER:-default}
+      INIT_DB_PASSWORD: ${OPENLIT_DB_PASSWORD:-OPENLIT}
+    ports:
+      - "4317:4317" 
+      - "4318:4318" 
+      - "8888:8888" 
+      - "55679:55679" 
+    depends_on:
+      - clickhouse
+    volumes:
+      - ./assets/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    restart: always
+    networks:
+      - localprom
+
+  otel-gpu-collector:
+    image: ghcr.io/openlit/otel-gpu-collector:latest
+    environment:
+      GPU_APPLICATION_NAME: 'chatbot'
+      GPU_ENVIRONMENT: 'staging'
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - otel-collector
+    restart: always
+    networks:
+      - localprom
+
+  # From docker-compose-prometheus-grafana.yaml
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - "./prometheus.yml:/etc/prometheus/prometheus.yml"
+    networks:
+      - localprom
+    ports:
+      - "9090:9090"
+  
+  node-exporter:
+    image: prom/node-exporter
+    networks:
+      - localprom
+    ports:
+      - "9100:9100"
+  
+  grafana:
+    image: grafana/grafana-enterprise
+    networks:
+      - localprom
+    ports:
+      - "3030:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # From docker-compose-qdrant-gpu.yaml
+  qdrant:
+    image: qdrant/qdrant:gpu-nvidia-latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    environment:
+      - QDRANT__GPU__INDEXING=1
+      - QDRANT__SERVICE__API_KEY=YOUR_KEY
+    networks:
+      - localprom
+
+networks:
+  localprom:
+    driver: bridge
+
+volumes:
+  clickhouse-data:
+  openlit-data:
+  grafana-storage:
